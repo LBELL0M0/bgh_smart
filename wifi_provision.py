@@ -308,20 +308,17 @@ class BGHWiFiProvisioner:
 
         _LOGGER.info("Discovering device MAC on UDP port %d...", UDP_RECV_PORT)
 
-        loop = asyncio.get_event_loop()
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.setblocking(False)
+        sock.setblocking(True)
+        sock.settimeout(timeout)
 
         try:
             sock.bind(('0.0.0.0', UDP_RECV_PORT))
 
             try:
-                data, addr = await asyncio.wait_for(
-                    loop.sock_recvfrom(sock, 1024),
-                    timeout=timeout,
-                )
+                data, addr = await asyncio.to_thread(sock.recvfrom, 1024)
 
                 _LOGGER.debug(
                     "Received %d bytes from %s: %s",
@@ -343,7 +340,7 @@ class BGHWiFiProvisioner:
                 _LOGGER.warning("Packet too short to extract MAC: %d bytes", len(data))
                 return None
 
-            except asyncio.TimeoutError:
+            except socket.timeout:
                 _LOGGER.warning(
                     "Discovery timeout - no broadcasts received in %.1f seconds",
                     timeout,
@@ -401,23 +398,20 @@ class BGHWiFiProvisioner:
         _LOGGER.info("  Encryption: %s", self._encryption_name(encryption_type))
         _LOGGER.debug("  Packet (%d bytes): %s", len(packet), packet.hex())
 
-        loop = asyncio.get_event_loop()
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.setblocking(False)
+        sock.setblocking(True)
+        sock.settimeout(self._timeout)
 
         try:
             # Send packet
-            await loop.sock_sendto(sock, packet, (device_ip, UDP_SEND_PORT))
+            await asyncio.to_thread(sock.sendto, packet, (device_ip, UDP_SEND_PORT))
             _LOGGER.info("Sent provisioning packet to %s:%d", device_ip, UDP_SEND_PORT)
 
             # Wait for response with retries
             for attempt in range(self._retries):
                 try:
-                    response, addr = await asyncio.wait_for(
-                        loop.sock_recvfrom(sock, 1024),
-                        timeout=self._timeout,
-                    )
+                    response, addr = await asyncio.to_thread(sock.recvfrom, 1024)
 
                     _LOGGER.debug(
                         "Attempt %d/%d: Received %d bytes from %s",
@@ -436,7 +430,7 @@ class BGHWiFiProvisioner:
                         )
                         return True
 
-                except asyncio.TimeoutError:
+                except socket.timeout:
                     _LOGGER.debug(
                         "Attempt %d/%d: No response (timeout)",
                         attempt + 1,
@@ -574,6 +568,11 @@ Encryption Types: 0=None, 1=WEP64, 2=WEP128, 3=TKIP, 4=AES (default)
         help='Discover device MAC from broadcasts',
     )
     parser.add_argument(
+        '--discover-loop',
+        action='store_true',
+        help='Continuously discover device MAC broadcasts until interrupted',
+    )
+    parser.add_argument(
         '--timeout',
         type=float,
         default=BGHWiFiProvisioner.DEFAULT_TIMEOUT,
@@ -590,6 +589,13 @@ Encryption Types: 0=None, 1=WEP64, 2=WEP128, 3=TKIP, 4=AES (default)
 
     async def main() -> int:
         provisioner = BGHWiFiProvisioner(timeout=args.timeout)
+
+        if args.discover_loop:
+            print("Listening for device broadcasts. Press Ctrl+C to stop.")
+            while True:
+                mac = await provisioner.async_discover_device(timeout=args.timeout)
+                if mac:
+                    print(f"Discovered device MAC: {mac.hex()}")
 
         if args.discover:
             mac = await provisioner.async_discover_device()
